@@ -1,0 +1,54 @@
+import re
+
+from examples import facts
+
+
+rule SilverStatus:
+    condition:
+        regex = re.compile('Maccio Capatonda')
+        account = facts.Account
+        re.search(regex, account.name)
+        account.miles > 25000 and account.status == 'bronze'
+    action:
+        account.status = 'silver'
+
+
+rule GoldStatus:
+    condition:
+        account = facts.Account
+        account.miles > 50000
+        account.status == 'silver'
+    action:
+        account.status = 'gold'
+
+
+rule ShortFlight:
+    condition:
+        account = facts.Account
+        flight = facts.Flight
+        miles = account.miles
+        flight.miles < 500
+        flight.account == account.name
+    action:
+        account.miles += 500
+        update_fact(account)
+
+
+rule LongFlight:
+    condition:
+        account = facts.Account
+        flight = facts.Flight
+        flight.miles >= 500
+        flight.account == account.name
+    action:
+        account.miles += flight.miles
+
+
+rule Pistombrillon:
+    condition:
+        accounts = [a for a in facts.Account if a == 'lol']
+        flight = re.search('asbinow', facts.Flight)
+        flight.miles >= 500
+        flight.account == account.name
+    action:
+        account.miles += flight.miles
