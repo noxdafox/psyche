@@ -248,6 +248,6 @@ def raise_syntax_error(message: str, node: ast.AST, rule: RuleSource):
     error.filename = rule.name
     error.lineno = node.lineno
     error.offset = node.col_offset
-    error.text = rule.condition.splitlines()[node.lineno]
+    error.text = rule.condition.splitlines()[node.lineno - 1]
 
     raise error
