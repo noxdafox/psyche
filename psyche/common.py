@@ -4,22 +4,27 @@ from collections import namedtuple
 from string import ascii_lowercase, ascii_uppercase
 
 # Parser
-RuleSource = namedtuple('RuleSource', ('name',
-                                       'condition',
-                                       'action'))
+RuleSource = namedtuple('RuleSource', ('name', 'condition', 'action'))
 ParsedRules = namedtuple('ParsedRules', ('file_name',
                                          'module_name',
                                          'python_source',
                                          'rules_source'))
 # Compiler
-Statements = namedtuple('ConditionStatements', ('constants',
-                                                         'alpha',
-                                                         'beta'))
+RuleStatements = namedtuple('RuleStatements', ('alpha', 'beta'))
 
 # Rules
 RuleNodes = namedtuple('RuleNodes', ('alpha', 'beta'))
 RuleNamespace = namedtuple('RuleNamespace', ('constants', 'module'))
 RuleCode = namedtuple('RuleCode', ('assignments', 'nodes', 'action'))
+
+
+def translate_facts(statement: str, facts: dict) -> str:
+    """Given a statement string, it translates all the encoded facts."""
+    for fact_class, fact_hash in facts.items():
+        statement = statement.replace(
+            fact_hash, '.'.join((fact_class.__module__, fact_class.__name__)))
+
+    return statement
 
 
 def encode_number(number: int) -> str:

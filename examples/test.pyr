@@ -5,7 +5,6 @@ from examples import facts
 
 rule SilverStatus:
     condition:
-        regex = re.compile('Maccio Capatonda')
         account = facts.Account
         re.search(regex, account.name)
         account.miles > 25000 and account.status == 'bronze'

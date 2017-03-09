@@ -9,7 +9,7 @@ from collections import defaultdict
 from tempfile import NamedTemporaryFile
 
 from psyche.facts import Fact
-from psyche.common import encode_number, Statements, RuleSource
+from psyche.common import encode_number, RuleStatements, RuleSource
 
 
 def import_source_code(source, module_name):
@@ -56,27 +56,29 @@ class Statement:
 
 
 class RuleCompiler:
-    __slots__ = 'facts', 'rule', 'module', 'translator'
+    __slots__ = 'rule', 'module', 'translator'
 
     def __init__(self, rule: RuleSource, module: ModuleType):
-        self.facts = {}  # FactClass: FactHash
         self.rule = rule
         self.module = module
         self.translator = RulesTranslator(module)
 
-    def compile_condition(self) -> Statements:
+    @property
+    def facts(self) -> dict:
+        return {v: k for k, v in self.translator.facts.items()}
+
+    def compile_condition(self) -> RuleStatements:
         """Compiles the rule condition."""
         condition = ast.parse(
             self.rule.condition, filename='<%s>' % self.rule.name, mode='exec')
 
         self.translator.translate(condition)
-        self.facts.update({v: k for k, v in self.translator.facts.items()})
 
         visitor = ConditionVisitor(self.module, self.rule,
                                    self.translator.facts)
         visitor.visit(condition)
 
-        return Statements(visitor.constants, visitor.alpha, visitor.beta)
+        return RuleStatements(visitor.alpha, visitor.beta)
 
     def compile_action(self):
         pass
@@ -132,6 +134,8 @@ class RulesTranslator(ast.NodeTransformer):
 
 
 class ConditionVisitor(ast.NodeVisitor):
+    __slots__ = 'rule', 'facts', 'module', 'alpha', 'beta', '_assignments'
+
     def __init__(self, module: ModuleType, rule: RuleSource, facts: dict):
         self.rule = rule
         self.facts = facts  # FactHash: FactClass
@@ -140,12 +144,7 @@ class ConditionVisitor(ast.NodeVisitor):
         self.alpha = defaultdict(list)
         self.beta = []
 
-        self._constants = []
         self._assignments = {}  # VarHash: FactClass
-
-    @property
-    def constants(self):
-        return Statement(ast.Module(self._constants))
 
     def visit_Assign(self, node):
         visitor = NamesVisitor()
@@ -156,7 +155,7 @@ class ConditionVisitor(ast.NodeVisitor):
                        if self.assignment(n)]
 
         if len(facts) > 1 or len(assignments) > 1 or facts and assignments:
-            raise_syntax_error("Only one Fact per assignment", node, self.rule)
+            raise_syntax_error("Max one Fact per assignment", node, self.rule)
 
         if facts:
             fact = facts[0]
@@ -167,7 +166,7 @@ class ConditionVisitor(ast.NodeVisitor):
             fact = self._assignments[assignments[0]]
             self.alpha[fact].append(Statement(node))
         else:
-            self._constants.append(node)
+            raise_syntax_error("No Fact found in Assignment", node, self.rule)
 
     def visit_Expr(self, node):
         visitor = NamesVisitor()
@@ -179,7 +178,7 @@ class ConditionVisitor(ast.NodeVisitor):
         variables = tuple(set(facts + assignments))
 
         if not variables:
-            raise_syntax_error("Expression without variables", node, self.rule)
+            raise_syntax_error("No Fact found in Expression", node, self.rule)
         elif len(variables) == 1:
             self.alpha[variables[0]].append(Statement(node))
         elif len(variables) > 1:
