@@ -7,12 +7,12 @@ from psyche.compiler import RuleCompiler
 from psyche.common import RuleStatements, translate_facts
 
 
+CACHE_SIZE = 64
 WME = namedtuple('wme', ('fact', 'globals', 'locals'))
 
 
 class ReteNode:
     __slots__ = 'statement'
-    CACHE_SIZE = 64
 
     def __init__(self, statement):
         self.statement = statement
@@ -50,7 +50,7 @@ class Rete:
 
     def __init__(self):
         self.facts = {}  # FactClass: FactHash
-        self.alpha_nodes = {}  # statement: ReteNode
+        self.alpha_nodes = {}  # Statement: ReteNode
         self.alpha_network = defaultdict(set)  # Fact: ReteNode
 
     def load(self, rules: list, module: ModuleType):
@@ -70,9 +70,9 @@ class Rete:
             network[fact].add(node)
 
             for statement in statements[1:]:
-                stmt = nodes.setdefault(statement, ReteNode(statement))
-                network[node].add(stmt)
-                node = stmt
+                new_node = nodes.setdefault(statement, ReteNode(statement))
+                network[node].add(new_node)
+                node = new_node
 
     def insert(self, fact: Fact):
         for node in self.alpha_network[fact]:
@@ -93,7 +93,7 @@ class Rete:
         Yields each node and its depth in the network.
 
         """
-        for fact in [f for f in self.alpha_network if f in self.facts]:
+        for fact in (f for f in self.alpha_network if f in self.facts):
             yield '.'.join((fact.__module__, fact.__name__)), 0
 
             for node in self.alpha_network[fact]:
