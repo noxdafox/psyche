@@ -141,54 +141,49 @@ class ConditionVisitor(ast.NodeVisitor):
         self.facts = facts  # FactHash: FactClass
         self.module = module
 
-        self.alpha = defaultdict(list)
+        self.alpha = defaultdict(list)  # FactClass: Statement
         self.beta = []
 
-        self._assignments = {}  # VarHash: FactClass
+        self._variables = {}  # VarHash: FactClass
 
-    def visit_Assign(self, node):
+    def visit_Assign(self, node: ast.AST):
+        facts = self.node_facts(node)
+
+        if not facts:
+            raise_syntax_error("No Fact found in Assignment", node, self.rule)
+        elif len(facts) > 1:
+            raise_syntax_error("Max one Fact per assignment", node, self.rule)
+        else:
+            self.alpha[facts[0]].append(Statement(node))
+            self._variables.update({t.id: facts[0] for t in node.targets})
+
+    def visit_Expr(self, node: ast.AST):
+        facts = self.node_facts(node)
+
+        if not facts:
+            raise_syntax_error("No Fact found in Expression", node, self.rule)
+        elif len(facts) == 1:
+            self.alpha[facts[0]].append(Statement(node))
+        else:
+            self.beta.append((facts, Statement(node)))
+
+    def node_facts(self, node: ast.AST) -> tuple:
+        """Return a list of FactClass referred within the statement."""
         visitor = NamesVisitor()
         visitor.visit(node.value)
 
         facts = [self.facts[n] for n in visitor.names if n in self.facts]
-        assignments = [n.split('.')[0] for n in visitor.names
-                       if self.assignment(n)]
+        facts += [self._variables[n.split('.')[0]]
+                  for n in visitor.names if self.variable(n)]
 
-        if len(facts) > 1 or len(assignments) > 1 or facts and assignments:
-            raise_syntax_error("Max one Fact per assignment", node, self.rule)
+        return tuple(set(facts))
 
-        if facts:
-            fact = facts[0]
-
-            self.alpha[fact].append(Statement(node))
-            self._assignments.update({t.id: fact for t in node.targets})
-        elif assignments:
-            fact = self._assignments[assignments[0]]
-            self.alpha[fact].append(Statement(node))
-        else:
-            raise_syntax_error("No Fact found in Assignment", node, self.rule)
-
-    def visit_Expr(self, node):
-        visitor = NamesVisitor()
-        visitor.visit(node)
-
-        facts = [self.facts[n] for n in visitor.names if n in self.facts]
-        assignments = [n.split('.')[0] for n in visitor.names if
-                       self.assignment(n)]
-        variables = tuple(set(facts + assignments))
-
-        if not variables:
-            raise_syntax_error("No Fact found in Expression", node, self.rule)
-        elif len(variables) == 1:
-            self.alpha[variables[0]].append(Statement(node))
-        elif len(variables) > 1:
-            self.beta.append((variables, Statement(node)))
-
-    def assignment(self, name):
+    def variable(self, name: str) -> bool:
+        """Return True if the name refers to a variable storing Fact data."""
         dotjoin = lambda parent, child: parent + '.' + child
 
         return any(n for n in accumulate(name.split('.'), dotjoin)
-                   if n in self._assignments)
+                   if n in self._variables)
 
 
 class NamesVisitor(ast.NodeVisitor):
