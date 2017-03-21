@@ -93,7 +93,7 @@ class Rete:
         Yields each node and its depth in the network.
 
         """
-        for fact in (f for f in self.alpha_network if f in self.facts):
+        for fact in [f for f in self.alpha_network if f in self.facts]:
             yield '.'.join((fact.__module__, fact.__name__)), 0
 
             for node in self.alpha_network[fact]:

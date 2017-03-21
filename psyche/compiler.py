@@ -56,26 +56,27 @@ class Statement:
 
 
 class RuleCompiler:
-    __slots__ = 'rule', 'module', 'translator'
+    __slots__ = 'rule', 'module', '_facts'
 
     def __init__(self, rule: RuleSource, module: ModuleType):
         self.rule = rule
         self.module = module
-        self.translator = RulesTranslator(module)
+
+        self._facts = {}
 
     @property
     def facts(self) -> dict:
-        return {v: k for k, v in self.translator.facts.items()}
+        return {v: k for k, v in self._facts.items()}
 
     def compile_condition(self) -> RuleStatements:
         """Compiles the rule condition."""
         condition = ast.parse(
             self.rule.condition, filename='<%s>' % self.rule.name, mode='exec')
 
-        self.translator.translate(condition)
+        translator = RulesTranslator(self.module, self._facts)
+        translator.translate(condition)
 
-        visitor = ConditionVisitor(self.module, self.rule,
-                                   self.translator.facts)
+        visitor = ConditionVisitor(self.module, self.rule, self._facts)
         visitor.visit(condition)
 
         return RuleStatements(visitor.alpha, visitor.beta)
@@ -85,44 +86,51 @@ class RuleCompiler:
 
 
 class RulesTranslator(ast.NodeTransformer):
-    """Visits a code tree translating all Fact names and assignment targets
+    """Visit a code tree translating all Fact names and assignment targets
     with unique hashes.
 
-    """
-    __slots__ = 'facts', '_name', '_module', '_variables' '_attribute'
+    Expand all facts assignments.
+    Translate all fact types with unique hashes.
+    Translate all complex assignments targets with unique hashes.
 
-    def __init__(self, module: ModuleType):
-        self.facts = {}  # FactHash: FactClass
+    """
+    __slots__ = 'facts', '_vars', '_name', '_names', '_module'
+
+    def __init__(self, module: ModuleType, facts: dict):
+        self.facts = facts     # FactHash: FactClass
+        self._vars = {}        # varname: hash(assignment)
+        self._names = {}       # varname: Name | Attribute.Name
         self._name = None
-        self._variables = {}
         self._module = module
-        self._attribute = False
         self.translate = self.visit
 
     def visit_Assign(self, node: ast.AST) -> ast.AST:
-        self._variables.update(hash_assignment(node))
-        self.generic_visit(node)
-        return node
+        if isinstance(node.value, (ast.Attribute, ast.Name)):
+            value = self.visit(node.value)
+            self._names.update({t.id: value for t in node.targets})
+        else:
+            self._vars.update(hash_assignment(node))
+            return self.generic_visit(node)
 
     def visit_Attribute(self, node: ast.AST) -> ast.AST:
-        self._attribute = True
         node.value = self.visit(node.value)
         self._name += '.' + node.attr
 
-        return self.translate_fact(node)
+        return self.hash_fact(node)
 
     def visit_Name(self, node: ast.AST) -> ast.AST:
         self._name = node.id
-        self._attribute = False
 
-        if node.id in self._variables:
+        if node.id in self._names:
+            return ast.copy_location(self._names[node.id], node)
+        if node.id in self._vars:
             return ast.copy_location(
-                ast.Name(id=self._variables[node.id], ctx=node.ctx), node)
+                ast.Name(id=self._vars[node.id], ctx=node.ctx), node)
         else:
-            return self.translate_fact(node)
+            return self.hash_fact(node)
 
-    def translate_fact(self, node: ast.AST) -> ast.AST:
-        fact = modulefact(self._module, self._name)
+    def hash_fact(self, node: ast.AST) -> ast.AST:
+        fact = name_to_fact(self._name, self._module)
 
         if fact is not None:
             fact_hash = encode_number(hash(fact))
@@ -169,51 +177,19 @@ class ConditionVisitor(ast.NodeVisitor):
 
     def node_facts(self, node: ast.AST) -> tuple:
         """Return a list of FactClass referred within the statement."""
-        visitor = NamesVisitor()
-        visitor.visit(node.value)
+        names = tuple(n.id for n in ast.walk(node) if isinstance(n, ast.Name))
 
-        facts = [self.facts[n] for n in visitor.names if n in self.facts]
-        facts += [self._variables[n.split('.')[0]]
-                  for n in visitor.names if self.variable(n)]
+        facts = [self.facts[n] for n in names if n in self.facts]
+        facts += [self._variables[n] for n in names if n in self._variables]
 
         return tuple(set(facts))
 
-    def variable(self, name: str) -> bool:
-        """Return True if the name refers to a variable storing Fact data."""
-        dotjoin = lambda parent, child: parent + '.' + child
 
-        return any(n for n in accumulate(name.split('.'), dotjoin)
-                   if n in self._variables)
-
-
-class NamesVisitor(ast.NodeVisitor):
-    """Visits an assignment or an expression storing the names."""
-    __slots__ = 'names', '_attribute'
-
-    def __init__(self):
-        self.names = set()
-        self._attribute = False
-
-    def visit_Attribute(self, node):
-        if self._attribute:
-            return self.visit(node.value) + '.' + node.attr
-        else:
-            self._attribute = True
-            self.names.add(self.visit(node.value) + '.' + node.attr)
-
-    def visit_Name(self, node):
-        if self._attribute:
-            self._attribute = False
-            return node.id
-        else:
-            self.names.add(node.id)
-
-
-def modulefact(module: ModuleType, name: str) -> Fact:
+def name_to_fact(name: str, module: ModuleType) -> Fact:
     """Returns the Fact Class if name is a fact, None otherwise."""
     dotjoin = lambda parent, child: parent + '.' + child
 
-    for reference in [n for n in accumulate(name.split('.'), dotjoin)]:
+    for reference in (n for n in accumulate(name.split('.'), dotjoin)):
         try:
             fact = reduce(getattr, reference.split('.'), module)
         except AttributeError:

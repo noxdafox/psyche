@@ -25,8 +25,8 @@ rule ShortFlight:
     condition:
         account = facts.Account
         flight = facts.Flight
-        miles = account.miles
-        flight.miles < 500
+        miles = flight.miles
+        miles < 500
         flight.account == account.name
     action:
         account.miles += 500
