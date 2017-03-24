@@ -4,7 +4,7 @@ from collections import defaultdict, namedtuple
 
 from psyche.facts import Fact
 from psyche.compiler import RuleCompiler
-from psyche.common import RuleStatements, translate_facts
+from psyche.common import RuleStatements
 
 
 CACHE_SIZE = 64
@@ -58,8 +58,8 @@ class Rete:
             compiler = RuleCompiler(rule, module)
             statements = compiler.compile_condition()
 
-            self.facts.update(compiler.facts)
-            self._load_alpha_nodes(statements)
+            # self.facts.update(compiler.facts)
+            # self._load_alpha_nodes(statements)
 
     def _load_alpha_nodes(self, rule_statements: RuleStatements):
         nodes = self.alpha_nodes
