@@ -179,10 +179,9 @@ def translate_fact(node: ast.AST, name: str,
     return node
 
 
-
 def syntax_error(message: str, node: ast.AST, rule: RuleSource):
     error = SyntaxError(message)
-    error.filename = rule.name
+    error.filename = "Rule: %s" % rule.name
     error.lineno = node.lineno
     error.offset = node.col_offset
     error.text = rule.condition.splitlines()[node.lineno - 1]
