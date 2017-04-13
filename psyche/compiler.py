@@ -4,10 +4,11 @@ import inspect
 import importlib
 from types import ModuleType
 from functools import reduce
-from itertools import accumulate, chain
 from tempfile import NamedTemporaryFile
+from itertools import accumulate, chain, count, cycle, islice
 
 from psyche.facts import Fact
+from psyche.rete import AlphaNode
 from psyche.common import RuleSource
 
 
@@ -33,6 +34,73 @@ class RuleCompiler(ast.NodeVisitor):
         self._names = {}       # varname: Name | Attribute.Name
         self._variables = {}   # varname: Call( FactClass )
 
+    def visit_Assign(self, node: ast.AST):
+        if isinstance(node.value, (ast.Attribute, ast.Name)):
+            names = tuple(t.id for t in node.targets)
+            delta = (self._names.keys()) & set(names)
+            if delta:
+                syntax_error("Names %s already assigned" % ', '.join(delta),
+                             node, self.rule)
+
+            self._names.update({t.id: node.value for t in node.targets})
+        else:
+            # TODO namespace node
+            pass
+
+    def visit_Expr(self, node: ast.AST):
+        if isinstance(node.value, ast.Call):
+            self.visit(node.value)
+        elif isinstance(node.value, ast.BoolOp):
+            self.visit(node.value)
+        elif isinstance(node.value, ast.Compare):
+            self.visit(node.value)
+        else:
+            syntax_error("Invalid Expression", node, self.rule)
+
+    def visit_Call(self, node: ast.AST) -> ast.AST:
+        pass
+
+    def visit_BoolOp(self, node: ast.AST) -> ast.AST:
+        pass
+
+    def visit_Compare(self, node: ast.AST) -> ast.AST:
+        for comparation in split_compare(node):
+            facts, statement = self.compare_statement(comparation)
+
+    def compare_statement(self, node: ast.AST) -> Statement:
+        if literal(node.left):
+            pass
+        elif literal(node.comparators):
+            pass
+        else:
+            facts = self.node_facts(node)
+            node = translate_facts(node, self._names, self.module)
+
+            return facts, Statement(node)
+
+    def node_facts(self, node: ast.AST) -> tuple:
+        """Return a list of FactClass referred within the statement."""
+        names = tuple(node_names(node))
+
+        facts = [name_to_fact(n, self.module) for n in names]
+        facts += [self._names.get(c) for n in names for c in n.split('.')]
+        facts += [self._variables.get(c) for n in names for c in n.split('.')]
+        facts = tuple(set(filter(None, facts)))
+
+        self._facts.update(facts)
+
+        return facts
+
+
+class RuleCompiler(ast.NodeVisitor):
+    def __init__(self, rule: RuleSource, module: ModuleType):
+        self.rule = rule
+        self.module = module
+
+        self._facts = set()    # FactClass
+        self._names = {}       # varname: Name | Attribute.Name
+        self._variables = {}   # varname: Call( FactClass )
+
     def compile_condition(self):
         condition = ast.parse(
             self.rule.condition, filename='<%s>' % self.rule.name, mode='exec')
@@ -47,11 +115,15 @@ class RuleCompiler(ast.NodeVisitor):
         if isinstance(node.value, (ast.Attribute, ast.Name)):
             self._names.update({t.id: facts[0] for t in node.targets})
         else:
-            # TODO Alpha Namespace Node
-            NamespaceStatement(translate_facts(node, self._names, self.module))
             self._variables.update({t.id: facts[0] for t in node.targets})
+            statement = NamespaceStatement(
+                translate_facts(node, self._names, self.module))
+            self.alpha_node(node, statement)
+            # TODO: AND Beta node
 
-        # TODO: AND Beta node
+    def alpha_node(self, node: ast.AST, statement: Statement):
+        names = tuple(node_names(node.value))
+        anode = AlphaNode(statement)
 
     def visit_Expr(self, node: ast.AST):
         facts = self.node_facts(node)
@@ -104,6 +176,13 @@ class Statement:
         return eval(self._code, global_namespace, local_namespace)
 
 
+class HashableStatement(Statement):
+    __slots__ = '_ast', '_code'
+
+    def __init__(self, syntax_tree: ast.AST):
+        pass
+
+
 class NamespaceStatement(Statement):
     __slots__ = '_ast', '_code'
 
@@ -114,20 +193,6 @@ class NamespaceStatement(Statement):
         exec(self._code, global_namespace, local_namespace)
 
         return True
-
-
-def name_to_fact(name: str, module: ModuleType) -> Fact:
-    """Return the Fact Class if name is a fact, None otherwise."""
-    dotjoin = lambda parent, child: parent + '.' + child
-
-    for reference in (n for n in accumulate(name.split('.'), dotjoin)):
-        try:
-            fact = reduce(getattr, reference.split('.'), module)
-        except AttributeError:
-            return None
-
-        if inspect.isclass(fact) and issubclass(fact, Fact):
-            return fact
 
 
 def node_names(node: ast.AST) -> str:
@@ -143,6 +208,20 @@ def node_names(node: ast.AST) -> str:
             elif isinstance(value, list):
                 yield from chain.from_iterable(
                     node_names(e) for e in value if isinstance(e, ast.AST))
+
+
+def name_to_fact(name: str, module: ModuleType) -> Fact:
+    """Return the Fact Class if name is a fact, None otherwise."""
+    dotjoin = lambda parent, child: parent + '.' + child
+
+    for reference in (n for n in accumulate(name.split('.'), dotjoin)):
+        try:
+            fact = reduce(getattr, reference.split('.'), module)
+        except AttributeError:
+            return None
+
+        if inspect.isclass(fact) and issubclass(fact, Fact):
+            return fact
 
 
 def translate_facts(node: ast.AST, names: dict, module: ModuleType) -> ast.AST:
@@ -177,6 +256,35 @@ def translate_fact(node: ast.AST, name: str,
         return ast.copy_location(ast.Name(id=new_name, ctx=node.ctx), node)
 
     return node
+
+
+def split_compare(node):
+    """Split a compare node."""
+    counter = count(0, 2)
+    elements = tuple(roundrobin([node.left], node.ops, node.comparators))
+    length = len(elements)
+
+    for index in counter:
+        if index + 3 > length:
+            raise StopIteration()
+
+        left, op, comparator = tuple(islice(elements, index, index + 3))
+
+        yield ast.Compare(left=left, ops=[op], comparators=[comparator])
+
+
+def roundrobin(*iterables):
+    "roundrobin('ABC', 'D', 'EF') --> A D E B F C"
+    # Recipe credited to George Sakkis
+    pending = len(iterables)
+    cicles = cycle(iter(it).__next__ for it in iterables)
+    while pending:
+        try:
+            for next_cicle in cicles:
+                yield next()
+        except StopIteration:
+            pending -= 1
+            cicles = cycle(islice(next_cicle, pending))
 
 
 def syntax_error(message: str, node: ast.AST, rule: RuleSource):
