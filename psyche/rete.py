@@ -4,17 +4,26 @@ from collections import defaultdict, namedtuple
 
 from psyche.facts import Fact
 from psyche.compiler import RuleCompiler
-from psyche.common import RuleStatements, translate_facts
+from psyche.common import RuleStatements
 
 
 CACHE_SIZE = 64
+<<<<<<< HEAD
 WME = namedtuple('wme', ('fact', 'globals', 'locals'))
 
 
 class ReteNode:
     __slots__ = 'statement'
+=======
+WME = namedtuple('WME', ('fact', 'globals', 'locals'))
+
+
+class ReteNode:
+    __slots__ = 'statement', 'children'
+>>>>>>> 3cb06802ab65e159012cf8b8bfd5f557c2f03651
 
     def __init__(self, statement):
+        self.children = set()
         self.statement = statement
 
     def __str__(self):
@@ -26,23 +35,52 @@ class ReteNode:
     def __eq__(self, element):
         return hash(self.statement) == hash(element)
 
-    def visit(self, wme: WME) -> bool:
-        if self.statement.mode == 'exec':
-            self.execute(wme)
-
-            return True
-        else:
-            return self.evaluate(wme)
-
-    @lru_cache(maxsize=CACHE_SIZE)
     def evaluate(self, wme: WME) -> bool:
-        """Evaluate the expression and returns its value."""
-        return eval(self.statement.code, wme.globals, wme.locals)
+        return self.statement.evaluate(wme.globals, wme.locals)
 
-    @lru_cache(maxsize=CACHE_SIZE)
-    def execute(self, wme: WME) -> bool:
-        """Execute the code and stores the results in the WME."""
-        exec(self.statement.code, wme.globals, wme.locals)
+
+class AlphaNode(ReteNode):
+    __slots__ = 'statement', 'children'
+
+    def visit(self, wme: WME) -> bool:
+        if self.evaluate(wme):
+            for child in self.children:
+                child.visit(wme)
+
+
+class BetaNode(ReteNode):
+    __slots__ = 'statement', 'children', 'parents'
+
+    def __init__(self, statement, parent_nodes):
+        super().__init__(statement)
+        self.parents = {n: [] for n in parent_nodes}
+
+    def visit(self, token: list, parent: ReteNode) -> bool:
+        for node in self.parents:
+            if node != parent:
+                break
+
+        for token in self.parents[node]:
+            if self.evaluate(wme):
+                for child in self.children:
+                    child.visit(wme)
+        else:
+            self.parents[parent].append(wme)
+
+
+class AndNode:
+
+    def visit(self, wme: WME) -> bool:
+        pass
+
+
+class OrNode:
+    def __init__(self):
+        self.left = {}
+        self.right = {}
+
+    def visit(self, wme: WME) -> bool:
+        pass
 
 
 class Rete:
@@ -58,8 +96,8 @@ class Rete:
             compiler = RuleCompiler(rule, module)
             statements = compiler.compile_condition()
 
-            self.facts.update(compiler.facts)
-            self._load_alpha_nodes(statements)
+            # self.facts.update(compiler.facts)
+            # self._load_alpha_nodes(statements)
 
     def _load_alpha_nodes(self, rule_statements: RuleStatements):
         nodes = self.alpha_nodes

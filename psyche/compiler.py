@@ -1,15 +1,26 @@
+"""
+Glossary:
+  fact: facts.Fact
+
+  statement: ast.Call
+  name: ast.Attribute, ast.Name
+  literal: ast.String, ast.Number
+
+"""
+
 import ast
 import sys
 import inspect
 import importlib
 from types import ModuleType
 from functools import reduce
-from itertools import accumulate
-from collections import defaultdict
 from tempfile import NamedTemporaryFile
+from collections import defaultdict, namedtuple
+from itertools import accumulate, chain, count, cycle, islice
 
-from psyche.facts import Fact
-from psyche.common import encode_number, RuleStatements, RuleSource
+from psyche.rete import AlphaNode
+from psyche.common import RuleSource
+from psyche.facts import Fact, fact_lookup
 
 
 def import_source_code(source, module_name):
@@ -25,195 +36,318 @@ def import_source_code(source, module_name):
         return module
 
 
-class Statement:
-    __slots__ = 'ast', 'mode', '_code'
+class RuleCompiler(ast.NodeVisitor):
+    def __init__(self, rule: RuleSource, module: ModuleType):
+        self.rule = rule
+        self.module = module
 
-    def __init__(self, syntax_tree):
+        # Fact: {name: [Statement]}
+        self._facts = defaultdict(defaultdict(list))
+        self._names = {}       # varname: ast.Name | ast.Attribute
+        self._variables = {}   # varname: Call( FactClass )
+
+    def visit_Assign(self, node: ast.AST):
+        if isinstance(node.value, (ast.Attribute, ast.Name)):
+            if any(t for t in node.targets if t.id in self._names):
+                syntax_error("Names can be assigned only once", node, self.rule)
+
+            self._names.update({t.id: node.value for t in node.targets})
+        else:
+            # TODO namespace node
+            pass
+
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        references = set()
+        function = self.visit(node.function)
+        args = tuple(self.visit(a) for a in node.args)
+        kwargs = tuple(self.visit(k) for k in node.keywords)
+
+        if isinstance(function, Statement):
+            pass
+        elif isinstance(function, FactReference):
+            references.add(function)
+
+        for arg in chain(args, kwargs):
+            if isinstance(arg, Statement):
+                pass
+            elif isinstance(arg, FactReference):
+                references.add(arg)
+
+        if references:
+            stmt = Statement(translate_facts(node, self._names, self.module))
+
+            for reference in references:
+                self._facts[reference.fact][reference.name].append(stmt)
+
+        return node
+
+    def visit_Attribute(self, node: ast.AST) -> (ast.AST, FactReference):
+        """If the Attribute refers to a Fact returns the FactReference."""
+        return fact_reference(node, self._names, self.module)
+
+    def visit_Name(self, node: ast.AST) -> (ast.AST, FactReference):
+        """If the Name refers to a Fact returns the FactReference."""
+        return fact_reference(node, self._names, self.module)
+
+
+def fact_reference(node: (ast.Attribute, ast.Name), names: dict,
+                   module: ModuleType) -> (ast.AST, FactReference):
+    """Returns the referred Fact if any or the node itself."""
+    fact = fact_lookup(module, node)
+    if fact is not None:
+        return FactReference(fact, None)
+
+    root = node_root(node)
+    fact = name_lookup(root, names, module)
+    if fact is not None:
+        return FactReference(fact, root)
+
+    return node
+
+
+def name_lookup(name: str, names: dict, module: ModuleType) -> Fact:
+    """"""
+    while 1:
+        try:
+            attribute = names[name]
+        except KeyError:
+            return
+
+        name = node_root(attribute)
+
+        fact = fact_lookup(module, attribute)
+        if fact is not None:
+            return fact
+
+
+def node_root(node: (ast.Attribute, ast.Name)) -> str:
+    """Return the id of the root """
+    if isinstance(node, ast.Name):
+        yield node.id
+    elif isinstance(node, ast.Attribute):
+        yield node_root(node.value)
+
+
+class Statement:
+    __slots__ = '_code', 'ast'
+
+    def __init__(self, node: ast.AST):
+        self.ast = node
         self._code = None
-        self.ast = syntax_tree
-        self.mode = 'exec' if isinstance(self.ast, ast.Assign) else 'eval'
 
     def __str__(self):
         return ast.dump(self.ast)
 
     def __hash__(self):
-        return hash(ast.dump(self.ast))
+        return hash(str(self))
 
     def __eq__(self, element):
         return hash(self) == hash(element)
 
-    @property
-    def code(self):
+    def evaluate(self, global_namespace, local_namespace):
         if self._code is None:
-            if self.mode == 'exec':
-                source = ast.Module([self.ast])
-            else:
-                source = ast.Expression(self.ast.body[0].value)
+            self._code = compile(self.ast, filename='<statement>', mode='eval')
 
-            self._code = compile(source, filename='<alpha>', mode=self.mode)
-
-        return self._code
+        return eval(self._code, global_namespace, local_namespace)
 
 
-class RuleCompiler:
-    __slots__ = 'rule', 'module', 'translator'
+class NamespaceStatement(Statement):
+    __slots__ = '_code', 'ast'
 
+    def evaluate(self, global_namespace, local_namespace):
+        if self._code is None:
+            self._code = compile(self.ast, filename='<statement>', mode='exec')
+
+        exec(self._code, global_namespace, local_namespace)
+
+        return True
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+class RuleCompiler(ast.NodeVisitor):
     def __init__(self, rule: RuleSource, module: ModuleType):
         self.rule = rule
         self.module = module
-        self.translator = RulesTranslator(module)
 
-    @property
-    def facts(self) -> dict:
-        return {v: k for k, v in self.translator.facts.items()}
+        self._facts = set()    # FactClass
+        self._names = {}       # varname: Name | Attribute
+        self._variables = {}   # varname: Call( FactClass )
 
-    def compile_condition(self) -> RuleStatements:
-        """Compiles the rule condition."""
-        condition = ast.parse(
-            self.rule.condition, filename='<%s>' % self.rule.name, mode='exec')
+    def visit_Assign(self, node: ast.AST):
+        if isinstance(node.value, (ast.Attribute, ast.Name)):
+            if any(t for t in node.targets if t.id in self._names):
+                syntax_error("Names can be assigned only once", node, self.rule)
 
-        self.translator.translate(condition)
+            self._names.update({t.id: node.value for t in node.targets})
+        else:
+            # TODO namespace node
+            pass
 
-        visitor = ConditionVisitor(self.module, self.rule,
-                                   self.translator.facts)
-        visitor.visit(condition)
+    def visit_Expr(self, node: ast.AST):
+        if isinstance(node.value, ast.Call):
+            self.visit(node.value)
+        elif isinstance(node.value, ast.BoolOp):
+            self.visit(node.value)
+        elif isinstance(node.value, ast.Compare):
+            self.visit(node.value)
+        else:
+            syntax_error("Invalid Expression", node, self.rule)
 
-        return RuleStatements(visitor.alpha, visitor.beta)
+    def visit_Call(self, node: ast.AST) -> ast.AST:
+        pass
 
-    def compile_action(self):
+    def visit_BoolOp(self, node: ast.AST) -> ast.AST:
+        pass
+
+    def visit_Compare(self, node: ast.AST) -> ast.AST:
+        for comparation in split_compare(node):
+            facts, statement = self.compare_statement(comparation)
+
+    def compare_statement(self, node: ast.Compare) -> Statement:
+        left_facts = self.node_facts(node.left)
+        right_facts = self.node_facts(node.comparators)
+
+        if not left_facts and not right_facts:
+            syntax_error("No facts in comparation", node, self.rule)
+        if left_facts and right_facts:
+            pass  # beta node
+        else:
+            # alpha node
+            return
+
+    def node_facts(self, node: ast.AST) -> FactReference:
+        """Return a list of FactReference referred within the node."""
+        facts = []
+
+        for name in node_names(node):
+            fact = fact_lookup(self.module, name)
+            if fact is not None:
+                facts.append(FactReference(fact, None))
+                continue
+
+            root = node_root(name)
+            fact = variables_lookup(root, self._names, self.module)
+            if fact is not None:
+                facts.append(FactReference(fact, root))
+                continue
+
+        return facts
+
+
+def variables_lookup(name, names, module):
+    """Searches the name """
+    while 1:
+        try:
+            attribute = names[name]
+        except KeyError:
+            return
+
+        name = node_root(attribute)
+
+        fact = fact_lookup(module, attribute)
+        if fact is not None:
+            return fact
+
+
+class Statement:
+    __slots__ = '_ast', '_code'
+
+    def __init__(self, syntax_tree: ast.AST):
+        self._code = None
+        self._ast = syntax_tree
+
+    def __str__(self):
+        return ast.dump(self._ast)
+
+    def __hash__(self):
+        return hash(str(self))
+
+    def __eq__(self, element):
+        return hash(self) == hash(element)
+
+    def evaluate(self, global_namespace, local_namespace):
+        if self._code is None:
+            self._code = compile(self._ast, filename='<statement>', mode='eval')
+
+        return eval(self._code, global_namespace, local_namespace)
+
+
+class HashableStatement(Statement):
+    __slots__ = '_ast', '_code'
+
+    def __init__(self, syntax_tree: ast.AST):
         pass
 
 
-class RulesTranslator(ast.NodeTransformer):
-    """Visits a code tree translating all Fact names and assignment targets
-    with unique hashes.
+class NamespaceStatement(Statement):
+    __slots__ = '_ast', '_code'
 
-    """
-    __slots__ = 'facts', '_name', '_module', '_variables' '_attribute'
+    def evaluate(self, global_namespace, local_namespace):
+        if self._code is None:
+            self._code = compile(self._ast, filename='<statement>', mode='exec')
 
-    def __init__(self, module: ModuleType):
-        self.facts = {}  # FactHash: FactClass
-        self._name = None
-        self._variables = {}
-        self._module = module
-        self._attribute = False
-        self.translate = self.visit
+        exec(self._code, global_namespace, local_namespace)
 
-    def visit_Assign(self, node: ast.AST) -> ast.AST:
-        self._variables.update(hash_assignment(node))
-        self.generic_visit(node)
-        return node
-
-    def visit_Attribute(self, node: ast.AST) -> ast.AST:
-        self._attribute = True
-        node.value = self.visit(node.value)
-        self._name += '.' + node.attr
-
-        return self.translate_fact(node)
-
-    def visit_Name(self, node: ast.AST) -> ast.AST:
-        self._name = node.id
-        self._attribute = False
-
-        if node.id in self._variables:
-            return ast.copy_location(
-                ast.Name(id=self._variables[node.id], ctx=node.ctx), node)
-        else:
-            return self.translate_fact(node)
-
-    def translate_fact(self, node: ast.AST) -> ast.AST:
-        fact = modulefact(self._module, self._name)
-
-        if fact is not None:
-            fact_hash = encode_number(hash(fact))
-            node = ast.copy_location(ast.Name(id=fact_hash, ctx=node.ctx), node)
-
-            self.facts[fact_hash] = fact
-
-        return node
+        return True
 
 
-class ConditionVisitor(ast.NodeVisitor):
-    __slots__ = 'rule', 'facts', 'module', 'alpha', 'beta', '_assignments'
-
-    def __init__(self, module: ModuleType, rule: RuleSource, facts: dict):
-        self.rule = rule
-        self.facts = facts  # FactHash: FactClass
-        self.module = module
-
-        self.alpha = defaultdict(list)  # FactClass: Statement
-        self.beta = []
-
-        self._variables = {}  # VarHash: FactClass
-
-    def visit_Assign(self, node: ast.AST):
-        facts = self.node_facts(node)
-
-        if not facts:
-            raise_syntax_error("No Fact found in Assignment", node, self.rule)
-        elif len(facts) > 1:
-            raise_syntax_error("Max one Fact per assignment", node, self.rule)
-        else:
-            self.alpha[facts[0]].append(Statement(node))
-            self._variables.update({t.id: facts[0] for t in node.targets})
-
-    def visit_Expr(self, node: ast.AST):
-        facts = self.node_facts(node)
-
-        if not facts:
-            raise_syntax_error("No Fact found in Expression", node, self.rule)
-        elif len(facts) == 1:
-            self.alpha[facts[0]].append(Statement(node))
-        else:
-            self.beta.append((facts, Statement(node)))
-
-    def node_facts(self, node: ast.AST) -> tuple:
-        """Return a list of FactClass referred within the statement."""
-        visitor = NamesVisitor()
-        visitor.visit(node.value)
-
-        facts = [self.facts[n] for n in visitor.names if n in self.facts]
-        facts += [self._variables[n.split('.')[0]]
-                  for n in visitor.names if self.variable(n)]
-
-        return tuple(set(facts))
-
-    def variable(self, name: str) -> bool:
-        """Return True if the name refers to a variable storing Fact data."""
-        dotjoin = lambda parent, child: parent + '.' + child
-
-        return any(n for n in accumulate(name.split('.'), dotjoin)
-                   if n in self._variables)
+def node_attributes(node: ast.AST) -> (ast.Attribute, ast.Name):
+    """Inspect a node yielding all Attributes and Names."""
+    if isinstance(node, (ast.Attribute, ast.Name)):
+        yield node
+    else:
+        for _, value in ast.iter_fields(node):
+            if isinstance(value, ast.AST):
+                yield from node_names(value)
+            elif isinstance(value, list):
+                yield from chain.from_iterable(
+                    node_names(e) for e in value if isinstance(e, ast.AST))
 
 
-class NamesVisitor(ast.NodeVisitor):
-    """Visits an assignment or an expression storing the names."""
-    __slots__ = 'names', '_attribute'
-
-    def __init__(self):
-        self.names = set()
-        self._attribute = False
-
-    def visit_Attribute(self, node):
-        if self._attribute:
-            return self.visit(node.value) + '.' + node.attr
-        else:
-            self._attribute = True
-            self.names.add(self.visit(node.value) + '.' + node.attr)
-
-    def visit_Name(self, node):
-        if self._attribute:
-            self._attribute = False
-            return node.id
-        else:
-            self.names.add(node.id)
+def node_root(node: (ast.Attribute, ast.Name)) -> str:
+    if isinstance(node, ast.Name):
+        yield node.id
+    elif isinstance(node, ast.Attribute):
+        yield node_root(node.value)
 
 
-def modulefact(module: ModuleType, name: str) -> Fact:
-    """Returns the Fact Class if name is a fact, None otherwise."""
+def node_names(node: ast.AST) -> str:
+    """Inspect a node yielding all qualified names."""
+    if isinstance(node, ast.Name):
+        yield node.id
+    elif isinstance(node, ast.Attribute):
+        yield next(node_names(node.value)) + '.' + node.attr
+    else:
+        for _, value in ast.iter_fields(node):
+            if isinstance(value, ast.AST):
+                yield from node_names(value)
+            elif isinstance(value, list):
+                yield from chain.from_iterable(
+                    node_names(e) for e in value if isinstance(e, ast.AST))
+
+
+def name_to_fact(name: str, module: ModuleType) -> Fact:
+    """Return the Fact Class if name is a fact, None otherwise."""
     dotjoin = lambda parent, child: parent + '.' + child
 
-    for reference in [n for n in accumulate(name.split('.'), dotjoin)]:
+    for reference in (n for n in accumulate(name.split('.'), dotjoin)):
         try:
             fact = reduce(getattr, reference.split('.'), module)
         except AttributeError:
@@ -223,26 +357,77 @@ def modulefact(module: ModuleType, name: str) -> Fact:
             return fact
 
 
-def hash_assignment(assignment: ast.Assign) -> dict:
-    """Generate unique hashes for the targets of a given Assignment.
+def translate_facts(node: ast.AST, names: dict, module: ModuleType) -> ast.AST:
+    """Translate facts referred within a node with __Fact_<Class Name>."""
+    if isinstance(node, ast.Name):
+        return translate_fact(node, node.id, names, module)
+    elif isinstance(node, ast.Attribute):
+        node.value = translate_facts(node.value, names, module)
+        return translate_fact(node, node_names(node), names, module)
+    else:
+        for field, value in ast.iter_fields(node):
+            if isinstance(value, ast.AST):
+                setattr(node, field, translate_facts(value, names, module))
+            elif isinstance(value, list):
+                value[:] = [translate_facts(v, names, module)
+                            for v in value if isinstance(v, ast.AST)]
 
-    Returns a dictionary containing the target and the related hash.
-
-    """
-    value = hash(ast.dump(assignment.value))
-    targets = tuple(set(name.id for node in assignment.targets
-                        for name in ast.walk(node)
-                        if isinstance(name, ast.Name)))
-
-    return {targets[index]: encode_number(value + index)
-            for index in range(len(targets))}
+        return node
 
 
-def raise_syntax_error(message: str, node: ast.AST, rule: RuleSource):
+def translate_fact(node: ast.AST, name: str,
+                   names: dict, module: ModuleType) -> ast.AST:
+    if name in names:
+        new_name = '__Fact_' + names[name].__name__
+
+        return ast.copy_location(ast.Name(id=new_name, ctx=node.ctx), node)
+
+    fact = name_to_fact(next(node_names(node)), module)
+    if fact is not None:
+        new_name = '__Fact_' + fact.__name__
+
+        return ast.copy_location(ast.Name(id=new_name, ctx=node.ctx), node)
+
+    return node
+
+
+def split_compare(node):
+    """Split a compare node."""
+    counter = count(0, 2)
+    elements = tuple(roundrobin([node.left], node.ops, node.comparators))
+    length = len(elements)
+
+    for index in counter:
+        if index + 3 > length:
+            raise StopIteration()
+
+        left, op, comparator = tuple(islice(elements, index, index + 3))
+
+        yield ast.Compare(left=left, ops=[op], comparators=[comparator])
+
+
+def roundrobin(*iterables):
+    "roundrobin('ABC', 'D', 'EF') --> A D E B F C"
+    # Recipe credited to George Sakkis
+    pending = len(iterables)
+    cicles = cycle(iter(it).__next__ for it in iterables)
+    while pending:
+        try:
+            for next_cicle in cicles:
+                yield next()
+        except StopIteration:
+            pending -= 1
+            cicles = cycle(islice(next_cicle, pending))
+
+
+def syntax_error(message: str, node: ast.AST, rule: RuleSource):
     error = SyntaxError(message)
-    error.filename = rule.name
+    error.filename = "Rule: %s" % rule.name
     error.lineno = node.lineno
     error.offset = node.col_offset
     error.text = rule.condition.splitlines()[node.lineno - 1]
 
     raise error
+
+
+FactReference = namedtuple('FactReference', ('fact', 'name'))
