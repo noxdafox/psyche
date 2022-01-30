@@ -1,46 +1,63 @@
-import ast
-import inspect
+import os
+
+from typing import List
 from types import ModuleType
 
 
-class Fact:
+class MetaFact(type):
+    def __init__(cls, name, bases, dct):
+        super(MetaFact, cls).__init__(name, bases, dct)
+
+        cls.__init__ = cls.__class__.make_init()
+        cls.__setattr__ = cls.__class__.make_setattr()
+
+    @classmethod
+    def make_init(cls):
+        def initializer(self, **kwargs):
+            for attr in self.__annotations__:
+                self.__dict__[attr] = kwargs.get(attr, None)
+
+        return initializer
+
+    @classmethod
+    def make_setattr(cls):
+        def setter(self, name, *_):
+            raise TypeError(f"Property {name} is immutable")
+
+        return setter
+
+    @classmethod
+    def make_repr(cls):
+        def repr(self):
+            return f'<{self.__class__} object at {id(self)}>'
+
+        return repr
+
+
+class Fact(metaclass=MetaFact):
     pass
 
 
-def fact_lookup(module: ModuleType, node: (ast.Attribute, ast.Name)) -> Fact:
-    """Returns the referenced Fact if found within the node."""
-    reference = module
-
-    for name in names_lookup(node):
-        try:
-            reference = getattr(reference, name)
-        except AttributeError:
-            return None
-
-        if inspect.isclass(reference) and issubclass(reference, Fact):
-            return reference
+def compile_facts(module: ModuleType) -> List[str]:
+    return [compile_fact(f)
+            for f in module.__dict__.values()
+            if isinstance(f, type)
+            and issubclass(f, Fact)
+            and f.__module__ == module.__name__]
 
 
-def translate_fact(module: ModuleType, node: (ast.Attribute, ast.Name), names: dict) -> ast.AST:
-    if name in names and isinstance(names[name], Fact):
-        new_name = '__Fact_' + names[name].__name__
+def compile_fact(fact: Fact) -> str:
+    slots = os.linesep.join(SLOT.format(slot_name=n, slot_type=TYPE_MAP[t])
+                            for n, t in fact.__annotations__.items())
 
-        return ast.copy_location(ast.Name(id=new_name, ctx=node.ctx), node)
-
-    fact = fact_lookup(next(names_lookup(node)), module)
-    if fact is not None:
-        new_name = '__Fact_' + fact.__name__
-
-        return ast.copy_location(ast.Name(id=new_name, ctx=node.ctx), node)
-
-    return node
+    return DEFTEMPLATE.format(name=fact.__name__,
+                              slots=slots)
 
 
-def names_lookup(node: (ast.Attribute, ast.Name)) -> str:
-    """Inspect a node yielding all qualified names."""
-    if isinstance(node, ast.Name):
-        yield node.id
-    elif isinstance(node, ast.Attribute):
-        yield from names_lookup(node.value)
-
-        yield node.attr
+DEFTEMPLATE = """(deftemplate {name}
+{slots})
+"""
+SLOT = """  (slot {slot_name} (type {slot_type}))"""
+TYPE_MAP = {str: 'STRING',
+            int: 'INTEGER',
+            float: 'FLOAT'}

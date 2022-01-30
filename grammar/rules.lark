@@ -1,0 +1,19 @@
+%import python (single_input, file_input, eval_input)
+%import python (compound_stmt, test, suite)
+%import python (NAME, _NEWLINE, _INDENT, _DEDENT, COMMENT)
+
+%extend compound_stmt: rule_stmt
+
+rule_stmt: "rule" NAME ":" lhs_stmt? rhs_stmt
+lhs_stmt: _NEWLINE _INDENT "condition" ":" _NEWLINE _INDENT condition+ _DEDENT
+rhs_stmt: "action" ":" suite _DEDENT
+
+condition: (test | bind | fact_match) _NEWLINE
+fact_match: NAME "(" constraint_list? ")"
+constraint_list: (bind | test) ["," (bind | test)]
+bind: test bind_op (fact_match | test)
+bind_op: "<-"
+
+%ignore /[\t \f]+/          // WS
+%ignore /\\[\t \f]*\r?\n/   // LINE_CONT
+%ignore COMMENT

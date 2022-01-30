@@ -1,5 +1,5 @@
-__all__ = ['Engine', 'Fact']
+__all__ = ['Environment', 'Fact']
 
 
 from psyche.facts import Fact
-from psyche.engine import Engine
+from psyche.environment import Environment
