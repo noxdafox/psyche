@@ -3,6 +3,8 @@ import os
 from typing import List
 from types import ModuleType
 
+import clips
+
 
 class MetaFact(type):
     def __init__(cls, name, bases, dct):
@@ -36,6 +38,14 @@ class MetaFact(type):
 
 class Fact(metaclass=MetaFact):
     pass
+
+
+class ClipsFact:
+    def __init__(self, fact: clips.TemplateFact):
+        self._fact = fact
+
+    def __getattr__(self, name: str):
+        return self._fact[name]
 
 
 def compile_facts(module: ModuleType) -> List[str]:
