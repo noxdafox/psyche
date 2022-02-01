@@ -1,5 +1,7 @@
 import os
 import sys
+import random
+import string
 import textwrap
 import importlib
 
@@ -26,8 +28,8 @@ def import_source_code(source: str, module_name: str) -> ModuleType:
         return module
 
 
-def compile_rule(name, lhs: lark.Tree, rhs: lark.Tree):
-    lhs_compiler = LHSCompiler(name, lhs)
+def compile_rule(module: ModuleType, name, lhs: lark.Tree, rhs: lark.Tree):
+    lhs_compiler = LHSCompiler(module, name, lhs)
     lhs_string, variables = lhs_compiler.compile()
     rhs_compiler = RHSCompiler(name, rhs, variables)
     rhs_string = rhs_compiler.compile()
@@ -41,9 +43,10 @@ def compile_rule(name, lhs: lark.Tree, rhs: lark.Tree):
 
 
 class LHSCompiler(visitors.Transformer):
-    def __init__(self, name: str, tree: lark.Tree):
+    def __init__(self, module: ModuleType, name: str, tree: lark.Tree):
         super().__init__()
 
+        self._module = module
         self._name = name
         self._tree = tree
         self._variables = []
@@ -93,6 +96,38 @@ class LHSCompiler(visitors.Transformer):
 
     def constraint_list(self, node):
         return Constraints(' '.join(node))
+
+    def python__funccall(self, node):
+        funcname, arguments = node
+
+        if isinstance(funcname, GetAttr):
+            name = funcname.name
+
+            if name not in sys.modules.keys() and name not in self._variables:
+                variable = f'?{random_name(6)}'
+
+                return Function(f'({name} {variable}&:(python_function ' +
+                                f'{funcname} {arguments}))')
+        for argument in arguments.split():
+            if argument not in self._variables:
+                variable = f'?{random_name(6)}'
+
+                arguments = arguments.replace(argument, variable)
+
+                return Function(f'({argument} {variable}&:' +
+                                f'(python_function {self._module.__name__} '+
+                                f'{funcname} {arguments}))')
+
+        return Function(f'(python_function {self._module.__name__} ' +
+                        f'{funcname} {arguments})')
+
+    def python__getattr(self, node):
+        name, attr = node
+
+        return GetAttr(f'{name}.{attr}', name, attr)
+
+    def python__arguments(self, node):
+        return Arguments(' '.join(node))
 
     def python__comparison(self, node):
         left, comparator, right = node
@@ -152,6 +187,24 @@ class Comparator(str):
         return super().__new__(cls, value)
 
 
+class GetAttr(str):
+    def __new__(cls, value, name, attr):
+        cls.name = name
+        cls.attr = attr
+
+        return super().__new__(cls, value)
+
+
+class Function(str):
+    def __new__(cls, value):
+        return super().__new__(cls, value)
+
+
+class Arguments(str):
+    def __new__(cls, value):
+        return super().__new__(cls, value)
+
+
 class Comparison(str):
     def __new__(cls, value, comparator, left, right):
         cls.comparator = comparator
@@ -184,6 +237,10 @@ class Variable(str):
 class Action(NamedTuple):
     code: 'code'
     varnames: list
+
+
+def random_name(length: int) -> str:
+    return ''.join(random.choice(string.ascii_lowercase) for _ in range(length))
 
 
 ACTION_MAP = {}

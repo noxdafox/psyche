@@ -1,3 +1,6 @@
+import sys
+import builtins
+
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
@@ -12,6 +15,7 @@ class Environment:
     def __init__(self):
         self._env = clips.Environment()
         self._env.define_function(python_action)
+        self._env.define_function(python_function)
 
     def load(self, path: Path):
         with path.open() as file:
@@ -30,7 +34,8 @@ class Environment:
             self._env.build(deftemplate)
 
         for rule in rules:
-            clips_rule = compiler.compile_rule(rule.name, rule.lhs, rule.rhs)
+            clips_rule = compiler.compile_rule(
+                module, rule.name, rule.lhs, rule.rhs)
             self._env.build(clips_rule)
 
         return module
@@ -50,6 +55,20 @@ class Environment:
 
 def python_action(name, *args):
     action = compiler.ACTION_MAP[name]
+    args = [facts.ClipsFact(a)
+            if isinstance(a, clips.TemplateFact) else a
+            for a in args]
     glbls = {k: v for k, v in zip(action.varnames, args)}
 
     exec(action.code, glbls)
+
+
+def python_function(modname: str, funcname: clips.Symbol, *args: list):
+    if hasattr(sys.modules[modname], funcname):
+        function = getattr(sys.modules[modname], funcname)
+    elif hasattr(builtins, funcname):
+        function = getattr(builtins, funcname)
+    else:
+        raise RuntimeError(f"Function {funcname} not defined")
+
+    return function(*args)
