@@ -35,6 +35,6 @@ Example
                              start_date - date.today() > THREE_YEARS)
         action:
             print(f"Raising {empl.surname} salary.")
-            empl.modify(salary+=400)
+            empl.modify(salary=empl.salary+400)
 
     THREE_YEARS = datetime.timedelta(weeks=54*3)
