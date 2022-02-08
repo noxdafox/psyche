@@ -57,11 +57,11 @@ def compile_facts(module: ModuleType) -> List[str]:
 
 
 def compile_fact(fact: Fact) -> str:
-    slots = os.linesep.join(SLOT.format(slot_name=n, slot_type=TYPE_MAP[t])
-                            for n, t in fact.__annotations__.items())
+    slots = os.linesep.join(
+        SLOT.format(slot_name=n, slot_type=TYPE_MAP.get(t, 'EXTERNAL-ADDRESS'))
+        for n, t in fact.__annotations__.items())
 
-    return DEFTEMPLATE.format(name=fact.__name__,
-                              slots=slots)
+    return DEFTEMPLATE.format(name=fact.__name__, slots=slots)
 
 
 DEFTEMPLATE = """(deftemplate {name}
