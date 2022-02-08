@@ -46,7 +46,7 @@ class LHSCompiler(visitors.Transformer):
     def __init__(self, module: ModuleType, name: str, tree: lark.Tree):
         super().__init__()
 
-        self._module = module
+        self._module_name = module.__name__
         self._name = name
         self._tree = tree
         self._variables = []
@@ -95,48 +95,61 @@ class LHSCompiler(visitors.Transformer):
         return Binder('<-')
 
     def constraint_list(self, node):
-        return Constraints(' '.join(node))
+        return Constraints(' '.join([n.clips_string()
+                                     if isinstance(n, Function)
+                                     else n
+                                     for n in node]))
 
     def python__funccall(self, node):
-        funcname, arguments = node
+        if len(node) > 1:
+            funcname, arguments = node
+        else:
+            funcname = node[0]
+            arguments = []
 
-        if isinstance(funcname, GetAttr):
-            name = funcname.name
+        args = ', '.join(arguments).replace('"', '\'')
+        function = f'{funcname}({args})'
+        slot, variable = find_function_slot(funcname, arguments, self._variables)
 
-            if name not in sys.modules.keys() and name not in self._variables:
-                variable = f'?{random_name(6)}'
-
-                return Function(f'({name} {variable}&:(python_function ' +
-                                f'{funcname} {arguments}))')
-        for argument in arguments.split():
-            if argument not in self._variables:
-                variable = f'?{random_name(6)}'
-
-                arguments = arguments.replace(argument, variable)
-
-                return Function(f'({argument} {variable}&:' +
-                                f'(python_function {self._module.__name__} '+
-                                f'{funcname} {arguments}))')
-
-        return Function(f'(python_function {self._module.__name__} ' +
-                        f'{funcname} {arguments})')
+        return Function(function, self._module_name, slot, variable)
 
     def python__getattr(self, node):
         name, attr = node
+        string = f'{name}.{attr}'
 
-        return GetAttr(f'{name}.{attr}', name, attr)
+        if isinstance(name, Function):
+            return Function(string, self._module_name, slot=name.slot, variable=name.variable)
+
+        return GetAttr(string, name, attr)
 
     def python__arguments(self, node):
-        return Arguments(' '.join(node))
+        return node
 
     def python__comparison(self, node):
         left, comparator, right = node
-        if comparator == 'eq':
+
+        if is_constant_constraint(left, comparator, right, self._variables):
             string = f'({left} {right})'
+        elif is_clips_constraint(left, comparator, right, self._variables):
+            lslot, lvar, left = find_comparison_slot(left, self._variables)
+            rslot, rvar, right = find_comparison_slot(right, self._variables)
+            slot = lslot if lslot is not None else rslot
+            variable = lvar if lvar is not None else rvar
+
+            string = f'({slot} {variable}&:({comparator} {left} {right}))'
         else:
-            string = f'({comparator} {left} {right})'
+            lslot, lvar, left = find_comparison_slot(left, self._variables)
+            rslot, rvar, right = find_comparison_slot(right, self._variables)
+            slot = lslot if lslot is not None else rslot
+            variable = lvar if lvar is not None else rvar
+
+            string = (f'({slot} {variable}&:' +
+                      f'(py-compare {comparator} {left} {right}))')
 
         return Comparison(string, comparator, left, right)
+
+    def python__comp_op(self, node):
+        return Comparator(COMPARATOR_MAP[str(node[0])])
 
     def python__var(self, node):
         return Variable(str(node[0]))
@@ -146,8 +159,8 @@ class LHSCompiler(visitors.Transformer):
 
         return String(f'"{string}"')
 
-    def python__comp_op(self, node):
-        return Comparator(COMPARATOR_MAP[str(node[0])])
+    def python__number(self, node):
+        return Number(str(node[0]))
 
 
 class RHSCompiler(visitors.Transformer):
@@ -166,7 +179,7 @@ class RHSCompiler(visitors.Transformer):
         ACTION_MAP[self._name] = Action(compile(code, self._name, 'exec'),
                                         self._variables)
 
-        return f'  (python_action {self._name} {variables})'
+        return f'  (py-action {self._name} {variables})'
 
     def rhs_stmt(self, node):
         return node[0]
@@ -189,6 +202,7 @@ class Comparator(str):
 
 class GetAttr(str):
     def __new__(cls, value, name, attr):
+        cls.root = name.split('.')[0]
         cls.name = name
         cls.attr = attr
 
@@ -196,22 +210,35 @@ class GetAttr(str):
 
 
 class Function(str):
-    def __new__(cls, value):
-        return super().__new__(cls, value)
+    def __new__(cls, value, module, slot=None, variable=None):
+        obj = super().__new__(cls, value)
+        obj.module = module
+        obj.slot = slot
+        obj.variable = variable
 
+        return obj
 
-class Arguments(str):
-    def __new__(cls, value):
-        return super().__new__(cls, value)
+    def clips_string(self, slot=True) -> str:
+        string = f'py-eval {self.module} "{self}"'
+
+        if self.slot is not None:
+            if slot:
+                return (f'({self.slot} {self.variable}&:' +
+                        f'({string} {self.slot} {self.variable}))')
+            else:
+                return f'({string} {self.slot} {self.variable})'
+
+        return f'({string} nil nil)'
 
 
 class Comparison(str):
     def __new__(cls, value, comparator, left, right):
-        cls.comparator = comparator
-        cls.left = left
-        cls.right = right
+        obj = super().__new__(cls, value)
+        obj.comparator = comparator
+        obj.left = left
+        obj.right = right
 
-        return super().__new__(cls, value)
+        return obj
 
 
 class Constraints(str):
@@ -229,6 +256,11 @@ class String(str):
         return super().__new__(cls, value)
 
 
+class Number(str):
+    def __new__(cls, value):
+        return super().__new__(cls, value)
+
+
 class Variable(str):
     def __new__(cls, value):
         return super().__new__(cls, value)
@@ -237,6 +269,54 @@ class Variable(str):
 class Action(NamedTuple):
     code: 'code'
     varnames: list
+
+
+def is_slot(name: str, variables: list) -> bool:
+    return isinstance(name, Variable) and name not in variables
+
+
+def is_slot_method(function: str, variables: list) -> bool:
+    return (isinstance(function, GetAttr) and
+            function.root not in sys.modules.keys() and
+            function.root not in variables)
+
+
+def is_constant_constraint(left: str, cmp: str, right: str, vrs: list) -> bool:
+    return (cmp == '==' and
+            any(is_slot(c, vrs) for c in (left, right)) and
+            any(isinstance(c, (String, Number)) for c in (left, right)))
+
+
+def is_clips_constraint(left: str, cmp: str, right: str, vrs: list) -> bool:
+    return any(isinstance(c, (String, Number)) for c in (left, right))
+
+
+def find_function_slot(function: str, arguments: list, variables: list) -> tuple:
+    if is_slot_method(function, variables):
+        return function.root, f'?{random_name(6)}'
+
+    for argument in arguments:
+        if is_slot_method(argument, variables):
+            return argument.root, f'?{random_name(6)}'
+        if is_slot(argument, variables):
+            return argument, f'?{random_name(6)}'
+        if isinstance(argument, Function):
+            return argument.slot, argument.variable
+    else:
+        return None, None
+
+
+def find_comparison_slot(name: str, variables) -> tuple:
+    if is_slot(name, variables):
+        variable = f'?{random_name(6)}'
+
+        return name, variable, variable
+    if isinstance(name, Function):
+        variable = name.variable if name.variable is not None else f'?{random_name(6)}'
+
+        return name.slot, variable, name.clips_string(slot=False)
+
+    return None, None, name
 
 
 def random_name(length: int) -> str:
@@ -248,6 +328,6 @@ COMPARATOR_MAP = {'<': '<',
                   '<=': '<=',
                   '>': '>',
                   '>=': '>=',
-                  '==': 'eq',
+                  '==': '==',
                   '!=': '<>',
                   'is': 'eq'}

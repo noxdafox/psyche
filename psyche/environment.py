@@ -14,8 +14,11 @@ from psyche import compiler
 class Environment:
     def __init__(self):
         self._env = clips.Environment()
-        self._env.define_function(python_action)
-        self._env.define_function(python_function)
+        self._env.define_function(python_action, name='py-action')
+        self._env.define_function(python_method, name='py-method')
+        self._env.define_function(python_function, name='py-function')
+        self._env.define_function(python_compare, name='py-compare')
+        self._env.define_function(python_eval, name='py-eval')
 
     def load(self, path: Path):
         with path.open() as file:
@@ -36,6 +39,7 @@ class Environment:
         for rule in rules:
             clips_rule = compiler.compile_rule(
                 module, rule.name, rule.lhs, rule.rhs)
+            print(clips_rule)
             self._env.build(clips_rule)
 
         return module
@@ -63,12 +67,50 @@ def python_action(name, *args):
     exec(action.code, glbls)
 
 
-def python_function(modname: str, funcname: clips.Symbol, *args: list):
-    if hasattr(sys.modules[modname], funcname):
-        function = getattr(sys.modules[modname], funcname)
-    elif hasattr(builtins, funcname):
+def python_eval(modname: str, code: str, slot: str, value: type) -> type:
+    glbls = sys.modules[modname].__dict__
+
+    if slot is not None:
+        glbls[slot] = value
+        return eval(code, glbls)
+    else:
+        return eval(code, glbls)
+
+
+def python_function(modname: str, funcname: str, *args: list):
+    if hasattr(builtins, funcname):
         function = getattr(builtins, funcname)
     else:
-        raise RuntimeError(f"Function {funcname} not defined")
+        function = find_function('.'.join((modname, funcname)))
 
     return function(*args)
+
+
+def python_method(name, method: str, *args: list):
+    function = getattr(name, method)
+
+    return bool(function(*args))
+
+
+def python_compare(comparator: str, left: type, right: type) -> bool:
+    return COMPARATOR_MAP[comparator](left, right)
+
+
+def find_function(string: str) -> callable:
+    """Resolve a root.stem.stem.stem returning the actual function."""
+    root, *stem = string.split('.')
+    function = sys.modules[root]
+
+    for element in stem:
+        function = getattr(function, element)
+
+    return function
+
+
+COMPARATOR_MAP = {'<': lambda l, r: l < r,
+                  '<=': lambda l, r: l <= r,
+                  '>': lambda l, r: l > r,
+                  '>=': lambda l, r: l >= r,
+                  '==': lambda l, r: l == r,
+                  '!=': lambda l, r: l != r,
+                  'eq': lambda l, r: l is r}
