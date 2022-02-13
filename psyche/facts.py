@@ -11,6 +11,8 @@ class MetaFact(type):
         super(MetaFact, cls).__init__(name, bases, dct)
 
         cls.__init__ = cls.__class__.make_init()
+        cls.__repr__ = cls.__class__.make_repr()
+        cls.__getattr__ = cls.__class__.make_getattr()
         cls.__setattr__ = cls.__class__.make_setattr()
 
     @classmethod
@@ -22,22 +24,50 @@ class MetaFact(type):
         return initializer
 
     @classmethod
+    def make_repr(cls):
+        def rep(self):
+            return f'<{self.__class__} object at {id(self)}>'
+
+        return rep
+
+    @classmethod
+    def make_getattr(cls):
+        def getter(self, name):
+            if self.__dict__['_fact'] is not None:
+                return self.__dict__['_fact'][name]
+
+            return self.__dict__[name]
+
+        return getter
+
+    @classmethod
     def make_setattr(cls):
-        def setter(self, name, *_):
-            raise TypeError(f"Property {name} is immutable")
+        def setter(self, name, value):
+            if name in self.__annotations__:
+                raise TypeError(f"Property {name} is immutable")
+
+            self.__dict__[name] = value
 
         return setter
 
-    @classmethod
-    def make_repr(cls):
-        def repr(self):
-            return f'<{self.__class__} object at {id(self)}>'
-
-        return repr
-
 
 class Fact(metaclass=MetaFact):
-    pass
+    _env: 'Environment'
+    _fact: clips.TemplateFact
+
+    def modify(self, **kwargs):
+        if self._fact is None:
+            raise RuntimeError("Cannot modify a fact which is not inserted")
+
+        self._fact.modify_slots(**kwargs)
+
+    def retract(self):
+        if self._fact is None:
+            raise RuntimeError("Cannot retract a fact which is not inserted")
+
+        self._fact.retract()
+
+        del self._env._facts[self._fact]
 
 
 class ClipsFact:
@@ -46,6 +76,9 @@ class ClipsFact:
 
     def __getattr__(self, name: str):
         return self._fact[name]
+
+    def retract(self):
+        self._fact.retract()
 
 
 def compile_facts(module: ModuleType) -> List[str]:
@@ -69,5 +102,6 @@ DEFTEMPLATE = """(deftemplate {name}
 """
 SLOT = """  (slot {slot_name} (type {slot_type}))"""
 TYPE_MAP = {str: 'STRING',
+            bool: 'SYMBOL',
             int: 'INTEGER',
             float: 'FLOAT'}
