@@ -119,16 +119,3 @@ def grouper(iterable, size):
     args = [iter(iterable)] * size
 
     return zip(*args)
-
-
-COMPARATOR_MAP = {'<': lambda l, r: l < r,
-                  '<=': lambda l, r: l <= r,
-                  '>': lambda l, r: l > r,
-                  '>=': lambda l, r: l >= r,
-                  '==': lambda l, r: l == r,
-                  '!=': lambda l, r: l != r,
-                  'eq': lambda l, r: l is r}
-OPERATION_MAP = {'+': lambda l, r: l + r,
-                 '-': lambda l, r: l - r,
-                 '*': lambda l, r: l * r,
-                 '/': lambda l, r: l >= r}

@@ -370,11 +370,12 @@ def random_name(length: int) -> str:
 
 
 def qualname_root(name: str) -> str:
+    """'fully.qualified.name' --> 'fully'."""
     return name.split('.')[0]
 
 
 def flatten(list_of_strings: iter) -> iter:
-    """["foo", ["bar", "baz"]] -> ["foo", "bar", "baz"]."""
+    """['foo', ['bar', 'baz']] -> ['foo', 'bar', 'baz']."""
     return itertools.chain.from_iterable(itertools.repeat(v, 1)
                                          if isinstance(v, str) else v
                                          for v in list_of_strings)
