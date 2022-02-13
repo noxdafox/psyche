@@ -4,6 +4,7 @@ import random
 import string
 import textwrap
 import importlib
+import itertools
 
 from types import ModuleType
 from typing import NamedTuple
@@ -28,25 +29,23 @@ def import_source_code(source: str, module_name: str) -> ModuleType:
         return module
 
 
-def compile_rule(module: ModuleType, name, lhs: lark.Tree, rhs: lark.Tree):
-    lhs_compiler = LHSCompiler(module, name, lhs)
+def compile_rule(environment: 'Environment',
+                 module_name: str,
+                 name, lhs: lark.Tree,
+                 rhs: lark.Tree) -> str:
+    lhs_compiler = LHSCompiler(module_name, name, lhs)
     lhs_string, variables = lhs_compiler.compile()
-    rhs_compiler = RHSCompiler(name, rhs, variables)
+    rhs_compiler = RHSCompiler(environment, module_name, name, rhs, variables)
     rhs_string = rhs_compiler.compile()
 
-    return os.linesep.join(
-        (f'(defrule {name}',
-         lhs_string,
-         '  =>',
-         rhs_string,
-         ')'))
+    return os.linesep.join((f'(defrule {name}', lhs_string, '  =>', rhs_string, ')'))
 
 
 class LHSCompiler(visitors.Transformer):
-    def __init__(self, module: ModuleType, name: str, tree: lark.Tree):
+    def __init__(self, module_name: str, name: str, tree: lark.Tree):
         super().__init__()
 
-        self._module_name = module.__name__
+        self._module_name = module_name
         self._name = name
         self._tree = tree
         self._variables = []
@@ -71,8 +70,7 @@ class LHSCompiler(visitors.Transformer):
     def bind(self, node):
         var, operator, value = node
         if var in self._variables:
-            raise SyntaxError(
-                f"Rule: {self._name} - Variable <{var}> already defined")
+            raise SyntaxError(f"Rule: {self._name} - Variable <{var}> already defined")
 
         self._variables.append(var)
 
@@ -80,16 +78,10 @@ class LHSCompiler(visitors.Transformer):
 
         if isinstance(value, Fact):
             return Bind(f'{variable} {operator} {value}')
-        elif isinstance(value, Variable):
+        if isinstance(value, Variable):
             return Bind(f'({value} {variable})')
-        elif isinstance(value, Comparison):
-            comp = value.comparator
-            left = value.left
-            right = value.right
 
-            return Bind(f'({left} {variable}&:({comp} {variable} {right}))')
-        else:
-            SyntaxError(f"Rule: {self._name} - Invalid Syntax: {node}")
+        raise SyntaxError(f"Rule: {self._name} - Invalid Syntax: {node}")
 
     def bind_op(self, node):
         return Binder('<-')
@@ -107,46 +99,65 @@ class LHSCompiler(visitors.Transformer):
             funcname = node[0]
             arguments = []
 
+        data = RuleData(self._module_name, self._variables)
         args = ', '.join(arguments).replace('"', '\'')
-        function = f'{funcname}({args})'
-        slot, variable = find_function_slot(funcname, arguments, self._variables)
 
-        return Function(function, self._module_name, slot, variable)
+        return Function(f'{funcname}({args})',
+                        self._module_name,
+                        *find_slot(funcname, arguments, data),
+                        find_variables(arguments, data))
+
+    def python__arith_expr(self, node):
+        left, operator, right = node
+        data = RuleData(self._module_name, self._variables)
+
+        return Operation(f' {operator} '.join((left, right)),
+                         self._module_name,
+                         *find_slot(operator, (left, right), data),
+                         find_variables((left, right), data))
 
     def python__getattr(self, node):
-        name, attr = node
-        string = f'{name}.{attr}'
+        root, stem = node
+        code = f'{root}.{stem}'
 
-        if isinstance(name, Function):
-            return Function(string, self._module_name, slot=name.slot, variable=name.variable)
+        if isinstance(root, Function):
+            return Function(code,
+                            root.module,
+                            slot=root.slot,
+                            varname=root.varname,
+                            variables=root.variables)
 
-        return GetAttr(string, name, attr)
+        return GetAttr(code)
 
     def python__arguments(self, node):
         return node
 
+    def python__argvalue(self, node):
+        return '='.join(node)
+
     def python__comparison(self, node):
-        left, comparator, right = node
+        left, cmp, right = node
+        variables = left, right
+        data = RuleData(self._module_name, self._variables)
 
-        if is_constant_constraint(left, comparator, right, self._variables):
-            string = f'({left} {right})'
-        elif is_clips_constraint(left, comparator, right, self._variables):
-            lslot, lvar, left = find_comparison_slot(left, self._variables)
-            rslot, rvar, right = find_comparison_slot(right, self._variables)
-            slot = lslot if lslot is not None else rslot
-            variable = lvar if lvar is not None else rvar
+        if is_constant_constraint(cmp, variables, data):
+            left, right = (f'?{v}' if v in self._variables else v for v in variables)
+            return CLIPSComparison(f'({left} {right})')
 
-            string = f'({slot} {variable}&:({comparator} {left} {right}))'
-        else:
-            lslot, lvar, left = find_comparison_slot(left, self._variables)
-            rslot, rvar, right = find_comparison_slot(right, self._variables)
-            slot = lslot if lslot is not None else rslot
-            variable = lvar if lvar is not None else rvar
+        slot, variable = find_slot(cmp, variables, data)
 
-            string = (f'({slot} {variable}&:' +
-                      f'(py-compare {comparator} {left} {right}))')
+        if is_clips_constraint(*variables):
+            left, right = (e.clips_string(slot=False)
+                           if isinstance(e, Function) else e
+                           for e in (left, right))
 
-        return Comparison(string, comparator, left, right)
+            return CLIPSComparison(f'({slot} {variable}&:({cmp} {left} {right}))')
+
+        return PythonComparison(f'{left} {cmp} {right}',
+                                self._module_name,
+                                slot=slot,
+                                varname=variable,
+                                variables=find_variables((left, right), data))
 
     def python__comp_op(self, node):
         return Comparator(COMPARATOR_MAP[str(node[0])])
@@ -155,18 +166,31 @@ class LHSCompiler(visitors.Transformer):
         return Variable(str(node[0]))
 
     def python__string(self, node):
-        string = str(node[0]).strip('"').strip("'")
+        code = str(node[0]).strip('"').strip("'")
 
-        return String(f'"{string}"')
+        return String(f'"{code}"')
 
     def python__number(self, node):
         return Number(str(node[0]))
 
+    def python__const_true(self, _):
+        return Boolean('TRUE')
+
+    def python__const_false(self, _):
+        return Boolean('FALSE')
+
 
 class RHSCompiler(visitors.Transformer):
-    def __init__(self, name: str, tree: lark.Tree, variables: list):
+    def __init__(self,
+                 env: 'Environment',
+                 module_name: str,
+                 name: str,
+                 tree: lark.Tree,
+                 variables: list):
         super().__init__()
 
+        self._env = env
+        self._module = sys.modules[module_name]
         self._name = name
         self._tree = tree
         self._variables = set(variables)
@@ -175,9 +199,9 @@ class RHSCompiler(visitors.Transformer):
         rhs = self.transform(self._tree)
         variables = ' '.join(f'?{v}' for v in self._variables)
         code = textwrap.dedent(reconstructor.reconstruct_code(rhs))
+        compiled = compile(code, self._name, 'exec')
 
-        ACTION_MAP[self._name] = Action(compile(code, self._name, 'exec'),
-                                        self._variables)
+        ACTION_MAP[self._name] = Action(self._env, compiled, self._module, self._variables)
 
         return f'  (py-action {self._name} {variables})'
 
@@ -201,44 +225,56 @@ class Comparator(str):
 
 
 class GetAttr(str):
-    def __new__(cls, value, name, attr):
-        cls.root = name.split('.')[0]
-        cls.name = name
-        cls.attr = attr
-
+    def __new__(cls, value):
         return super().__new__(cls, value)
 
 
 class Function(str):
-    def __new__(cls, value, module, slot=None, variable=None):
-        obj = super().__new__(cls, value)
+    module: str = None
+    slot: str = None
+    varname: str = None
+    variables: list = None
+
+    def __new__(cls: type,
+                code: str,
+                module: str,
+                slot: str = None,
+                varname: str = None,
+                variables: str = None):
+        obj = super().__new__(cls, code)
         obj.module = module
         obj.slot = slot
-        obj.variable = variable
+        obj.varname = varname
+        obj.variables = variables if variables is not None else []
 
         return obj
 
     def clips_string(self, slot=True) -> str:
-        string = f'py-eval {self.module} "{self}"'
+        function = f'py-eval {self.module} "{self}"'
+        variables = ' '.join([f'{v} ?{v}' for v in self.variables])
 
         if self.slot is not None:
+            variables += f' {self.slot} {self.varname}'
+
             if slot:
-                return (f'({self.slot} {self.variable}&:' +
-                        f'({string} {self.slot} {self.variable}))')
-            else:
-                return f'({string} {self.slot} {self.variable})'
+                return f'({self.slot} {self.varname}&:({function} {variables}))'
 
-        return f'({string} nil nil)'
+            return f'({function} {variables})'
+
+        return f'({function} {variables})'
 
 
-class Comparison(str):
-    def __new__(cls, value, comparator, left, right):
-        obj = super().__new__(cls, value)
-        obj.comparator = comparator
-        obj.left = left
-        obj.right = right
+class CLIPSComparison(str):
+    def __new__(cls, value):
+        return super().__new__(cls, value)
 
-        return obj
+
+class PythonComparison(Function):
+    pass
+
+
+class Operation(Function):
+    pass
 
 
 class Constraints(str):
@@ -261,69 +297,91 @@ class Number(str):
         return super().__new__(cls, value)
 
 
+class Boolean(str):
+    def __new__(cls, value):
+        return super().__new__(cls, value)
+
+
 class Variable(str):
     def __new__(cls, value):
         return super().__new__(cls, value)
 
 
 class Action(NamedTuple):
+    env: 'Environment'
     code: 'code'
+    module: str
     varnames: list
 
 
-def is_slot(name: str, variables: list) -> bool:
-    return isinstance(name, Variable) and name not in variables
+class RuleData(NamedTuple):
+    module: str
+    variables: list
 
 
-def is_slot_method(function: str, variables: list) -> bool:
-    return (isinstance(function, GetAttr) and
-            function.root not in sys.modules.keys() and
-            function.root not in variables)
-
-
-def is_constant_constraint(left: str, cmp: str, right: str, vrs: list) -> bool:
+def is_constant_constraint(cmp: str, variables: list, data: RuleData) -> bool:
     return (cmp == '==' and
-            any(is_slot(c, vrs) for c in (left, right)) and
-            any(isinstance(c, (String, Number)) for c in (left, right)))
+            any(is_slot(c, data) or c in data.variables for c in variables) and
+            any(isinstance(c, CLIPS_TYPE) or c in data.variables for c in variables))
 
 
-def is_clips_constraint(left: str, cmp: str, right: str, vrs: list) -> bool:
-    return any(isinstance(c, (String, Number)) for c in (left, right))
+def is_clips_constraint(left: str, right: str) -> bool:
+    return any(isinstance(c, CLIPS_TYPE) for c in (left, right))
 
 
-def find_function_slot(function: str, arguments: list, variables: list) -> tuple:
-    if is_slot_method(function, variables):
-        return function.root, f'?{random_name(6)}'
+def find_slot(function: str, arguments: list, data: RuleData) -> list:
+    if is_slot_method(function, data):
+        return qualname_root(function), f'?{random_name(6)}'
 
     for argument in arguments:
-        if is_slot_method(argument, variables):
-            return argument.root, f'?{random_name(6)}'
-        if is_slot(argument, variables):
+        if is_slot_method(argument, data):
+            return qualname_root(function), f'?{random_name(6)}'
+        if is_slot(argument, data):
             return argument, f'?{random_name(6)}'
-        if isinstance(argument, Function):
-            return argument.slot, argument.variable
-    else:
-        return None, None
+        if isinstance(argument, Function) and argument.slot is not None:
+            return argument.slot, argument.varname
+
+    return None, None
 
 
-def find_comparison_slot(name: str, variables) -> tuple:
-    if is_slot(name, variables):
-        variable = f'?{random_name(6)}'
+def find_variables(variables: list, data: RuleData) -> iter:
+    """Returns a flattened list of variables."""
+    variables = flatten((getattr(v, 'variables', v) for v in variables))
 
-        return name, variable, variable
-    if isinstance(name, Function):
-        variable = name.variable if name.variable is not None else f'?{random_name(6)}'
+    return filter(lambda v: v in data.variables, variables)
 
-        return name.slot, variable, name.clips_string(slot=False)
 
-    return None, None, name
+def is_slot_method(function: str, data: RuleData) -> bool:
+    return isinstance(function, GetAttr) and is_slot(function, data)
+
+
+def is_slot(name: str, data: RuleData) -> bool:
+    if isinstance(name, GetAttr):
+        name = Variable(qualname_root(name))
+
+    return (isinstance(name, Variable) and
+            name not in data.variables and
+            name not in sys.modules.keys() and
+            name not in sys.modules[data.module].__dict__)
 
 
 def random_name(length: int) -> str:
     return ''.join(random.choice(string.ascii_lowercase) for _ in range(length))
 
 
+def qualname_root(name: str) -> str:
+    return name.split('.')[0]
+
+
+def flatten(list_of_strings: iter) -> iter:
+    """["foo", ["bar", "baz"]] -> ["foo", "bar", "baz"]."""
+    return itertools.chain.from_iterable(itertools.repeat(v, 1)
+                                         if isinstance(v, str) else v
+                                         for v in list_of_strings)
+
+
 ACTION_MAP = {}
+CLIPS_TYPE = String, Number, Boolean
 COMPARATOR_MAP = {'<': '<',
                   '<=': '<=',
                   '>': '>',
