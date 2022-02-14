@@ -55,6 +55,12 @@ class Fact(metaclass=MetaFact):
     _env: 'Environment'
     _fact: clips.TemplateFact
 
+    def pretty(self) -> str:
+        """Returns the pretty representation of the Fact."""
+        args = ', '.join((f'{n}={getattr(self, n)}' for n in self.__annotations__))
+
+        return f'{self.__class__.__name__}({args})'
+
     def modify(self, **kwargs):
         if self._fact is None:
             raise RuntimeError("Cannot modify a fact which is not inserted")
