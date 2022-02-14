@@ -43,7 +43,7 @@ class Environment:
         for rule in rules:
             clips_rule = compiler.compile_rule(
                 self, module_name, rule.name, rule.lhs, rule.rhs)
-            print(clips_rule)
+            # print(clips_rule)
             self._env.build(clips_rule)
 
         return module
@@ -68,6 +68,10 @@ class Environment:
         self._facts = {}
 
 
+def insert_fact(fact):
+    return PSYCHE.insert_fact(fact)
+
+
 def python_action(name, *args):
     action = compiler.ACTION_MAP[name]
     args = [action.env._facts[a]
@@ -75,6 +79,10 @@ def python_action(name, *args):
             else a
             for a in args]
     glbls = action.module.__dict__ | dict(zip(action.varnames, args))
+
+    # Globals are set when the function is defined, not when it's called
+    global PSYCHE
+    PSYCHE = action.env
 
     exec(action.code, glbls)
 
@@ -119,3 +127,6 @@ def grouper(iterable, size):
     args = [iter(iterable)] * size
 
     return zip(*args)
+
+
+PSYCHE = None
